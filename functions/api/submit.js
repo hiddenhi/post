@@ -1,3 +1,6 @@
+// 导入ws里的推送函数，路径不变
+import { sendToWSClient } from "../ws.js";
+
 // 处理OPTIONS预检，解决405
 export async function onRequestOptions() {
   return new Response(null, {
@@ -36,11 +39,15 @@ export async function onRequestPost({ request, env }) {
     await env.DB.prepare(
       "INSERT INTO form_submit (name, phone, create_time) VALUES (?, ?, ?)"
     ).bind(name, phone, now).run();
-
+    
+    // 3. 推送数据到WS客户端（逻辑完全不变）
+    const submitData = { name, phone, time: now };
+    sendToWSClient(submitData);
+    
     return Response.json({
       code: 200,
       msg: "提交成功",
-      data: { name, phone, time: now }
+      data: submitData
     });
 
   } catch (err) {
