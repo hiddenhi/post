@@ -17,7 +17,7 @@ let ws;
 
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws = new WebSocket(`${proto}//${location.host}/wss`);
 
   ws.onopen = () => {
     console.log("WS连接成功，依靠底层协议Ping保活");
