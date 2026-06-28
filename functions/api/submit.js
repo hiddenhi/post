@@ -75,7 +75,7 @@ export async function onRequest({ request, env }) {
   const url = new URL(request.url);
 
   // 路径 /ws 处理WebSocket握手
-  if (url.pathname === "/ws") {
+  if (url.pathname === "/wss") {
     const upgradeHeader = request.headers.get("Upgrade");
     if (!upgradeHeader || upgradeHeader !== "websocket") {
       return Response.json({ code: 400, msg: "仅支持WebSocket连接" }, { status: 400 });
