@@ -25,8 +25,16 @@ export async function onRequestOptions() {
 
 // 只处理POST提交：入库 + 推送WS
 export async function onRequestPost({ request, env }) {
+  // 第一层：单独捕获JSON解析错误
+  let body;
   try {
-    const body = await request.json();
+    body = await request.json();
+  } catch (parseErr) {
+    console.error("JSON解析错误：", parseErr);
+    return Response.json({ code: 400, msg: "请求体不是合法JSON" }, { status: 400 });
+  }
+
+  try {
     const { name, phone } = body;
 
     if (!name || !phone) {
@@ -67,14 +75,14 @@ export async function onRequestPost({ request, env }) {
       msg: "提交成功",
       data: submitData
     });
-  } catch (err) {
-    console.error(err);
-    return Response.json({ code: 500, msg: "请求必须为JSON" }, { status: 500 });
+  } catch (bizErr) {
+    // 第二层：数据库/业务逻辑报错
+    console.error("业务/数据库异常：", bizErr);
+    return Response.json({ code: 500, msg: "数据库操作失败" }, { status: 500 });
   }
 }
 
 // 拦截GET/HEAD/PUT/DELETE等所有其他方法
-// GET携带Upgrade头 → 升级WebSocket；其余方法返回405
 export async function onRequest({ request }) {
   const method = request.method;
   const upgradeHeader = request.headers.get("Upgrade");
@@ -92,14 +100,12 @@ export async function onRequest({ request }) {
     }
     globalSocket = server;
 
-    // 接收客户端普通消息，底层协议ping/pong自动处理无需代码
     server.addEventListener("message", (e) => {
       try {
         console.log("客户端消息：", e.data);
       } catch {}
     });
 
-    // 连接断开清空全局缓存
     server.addEventListener("close", () => {
       if (globalSocket === server) globalSocket = null;
     });
@@ -107,6 +113,5 @@ export async function onRequest({ request }) {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // 不满足WS升级条件的GET、HEAD、PUT、DELETE等全部返回405
   return Response.json({ code: 405, msg: "仅允许POST提交表单，GET仅支持WebSocket升级连接" }, { status: 405 });
 }
