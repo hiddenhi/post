@@ -68,7 +68,7 @@ export async function onRequestPost({ request, env }) {
     ).bind(name, phone, now).run();
 
     // 有在线WS客户端则推送数据
-    sendToWSClient(submitData);
+    //sendToWSClient(submitData);
 
     return Response.json({
       code: 200,
