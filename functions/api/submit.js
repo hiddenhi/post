@@ -34,16 +34,16 @@ export async function onRequestPost({ request, env }) {
       }, { status: 409 });
     }
 
-    // 2. 不存在则写入数据库
+    // 2. 写入数据库
     const now = new Date().toLocaleString();
+    const submitData = { name, phone, time: now };
     await env.DB.prepare(
       "INSERT INTO form_submit (name, phone, create_time) VALUES (?, ?, ?)"
     ).bind(name, phone, now).run();
-    
+
     // 3. 推送数据到WS客户端（逻辑完全不变）
-    const submitData = { name, phone, time: now };
     sendToWSClient(submitData);
-    
+
     return Response.json({
       code: 200,
       msg: "提交成功",
