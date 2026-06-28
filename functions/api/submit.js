@@ -1,7 +1,7 @@
-// 全局唯一WS连接（同Worker实例内存共享）
+// 全局缓存唯一WS长连接
 let globalSocket = null;
 
-// 推送消息到WS客户端
+/** 推送数据给WS客户端 */
 function sendToWSClient(data) {
   if (!globalSocket || globalSocket.readyState !== WebSocket.OPEN) return false;
   try {
@@ -16,18 +16,19 @@ function sendToWSClient(data) {
   }
 }
 
-// 统一处理OPTIONS预检
+// 处理OPTIONS预检，解决405
 export async function onRequestOptions() {
-  return new Response(null, { status: 204 });
+  return new Response(null, {
+    status: 204
+  });
 }
 
-// POST 表单提交逻辑
-async function handleSubmit(request, env) {
+// 只处理POST提交：入库 + 推送WS
+export async function onRequestPost({ request, env }) {
   try {
     const body = await request.json();
     const { name, phone } = body;
 
-    // 参数校验
     if (!name || !phone) {
       return Response.json({ code: 400, msg: "姓名和手机号不能为空" }, { status: 400 });
     }
@@ -35,7 +36,7 @@ async function handleSubmit(request, env) {
       return Response.json({ code: 400, msg: "手机号格式错误" }, { status: 400 });
     }
 
-    // D1查重
+    // D1 数据库查重
     const existRes = await env.DB.prepare(
       "SELECT * FROM form_submit WHERE phone = ?"
     ).bind(phone).first();
@@ -49,12 +50,16 @@ async function handleSubmit(request, env) {
 
     // 写入数据库
     const now = new Date().toLocaleString();
-    const submitData = { name, phone, time: now };
+    const submitData = {
+      name,
+      phone,
+      time: now
+    };
     await env.DB.prepare(
       "INSERT INTO form_submit (name, phone, create_time) VALUES (?, ?, ?)"
     ).bind(name, phone, now).run();
 
-    // 推送给在线WS
+    // 有在线WS客户端则推送数据
     sendToWSClient(submitData);
 
     return Response.json({
@@ -68,57 +73,40 @@ async function handleSubmit(request, env) {
   }
 }
 
-// WebSocket握手处理
-async function handleWS(request) {
+// 拦截GET/HEAD/PUT/DELETE等所有其他方法
+// GET携带Upgrade头 → 升级WebSocket；其余方法返回405
+export async function onRequest({ request }) {
+  const method = request.method;
   const upgradeHeader = request.headers.get("Upgrade");
-  if (!upgradeHeader || upgradeHeader !== "websocket") {
-    return Response.json({ code: 400, msg: "仅支持WebSocket连接" }, { status: 400 });
-  }
 
-  const [client, server] = new WebSocketPair();
-  server.accept();
+  // GET 请求 + WebSocket升级头 → 创建WS长连接
+  if (method === "GET" && upgradeHeader === "websocket") {
+    const [client, server] = new WebSocketPair();
+    server.accept();
 
-  // 新连接挤掉旧连接
-  if (globalSocket) {
-    try {
-      globalSocket.close(1000, "新客户端接入，断开旧连接");
-    } catch (e) {}
-  }
-  globalSocket = server;
-
-  // 接收客户端普通消息（底层协议ping/pong自动处理）
-  server.addEventListener("message", (e) => {
-    try {
-      console.log("客户端消息：", e.data);
-    } catch {}
-  });
-
-  // 断开清空缓存
-  server.addEventListener("close", () => {
-    if (globalSocket === server) globalSocket = null;
-  });
-
-  return new Response(null, { status: 101, webSocket: client });
-}
-
-// 主入口分发所有请求
-export async function onRequest({ request, env }) {
-  const url = new URL(request.url);
-  const path = url.pathname;
-
-  // WebSocket路由 /wss
-  if (path === "/wss") {
-    return handleWS(request);
-  }
-
-  // 表单提交路由 /api/submit
-  if (path === "/api/submit") {
-    if (request.method !== "POST") {
-      return Response.json({ code: 405, msg: "仅允许POST提交表单" }, { status: 405 });
+    // 新连接挤掉旧连接
+    if (globalSocket) {
+      try {
+        globalSocket.close(1000, "新客户端接入，断开旧连接");
+      } catch (e) {}
     }
-    return handleSubmit(request, env);
+    globalSocket = server;
+
+    // 接收客户端普通消息，底层协议ping/pong自动处理无需代码
+    server.addEventListener("message", (e) => {
+      try {
+        console.log("客户端消息：", e.data);
+      } catch {}
+    });
+
+    // 连接断开清空全局缓存
+    server.addEventListener("close", () => {
+      if (globalSocket === server) globalSocket = null;
+    });
+
+    return new Response(null, { status: 101, webSocket: client });
   }
 
-  // 其他路径交给静态资源（public文件夹）
-  return env.ASSETS.fetch(request);
+  // 不满足WS升级条件的GET、HEAD、PUT、DELETE等全部返回405
+  return Response.json({ code: 405, msg: "仅允许POST提交表单，GET仅支持WebSocket升级连接" }, { status: 405 });
 }
