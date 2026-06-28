@@ -1,3 +1,10 @@
 name = "form-submit"
 pages_build_output_dir = "public"
 compatibility_date = "2026-06-01"
+
+# D1数据库绑定 [[d1_databases]]
+[[d1_databases]]
+binding = "DB"               # 代码里 env.DB 对应这个名字，固定写DB
+database_name = "form_submit"
+database_id = "8493344f-bda9-42c1-a578-35fb8cc96d0c"
+# migrations_dir = "./d1/migrations" # 存放建表SQL迁移文件（可选）
