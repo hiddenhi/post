@@ -9,15 +9,19 @@
     .item { margin:10px 0; }
     input { width:100%; padding:8px; box-sizing:border-box; }
     button { width:100%; padding:10px; background:#007bff; color:#fff; border:none; cursor:pointer; }
+    button:disabled {
+      background: #6c757d;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
 <div class="box">
   <div class="item">
-    <input type="text" id="name" placeholder="请输入姓名">
+    <input type="text" id="name" placeholder="请输入姓名" required>
   </div>
   <div class="item">
-    <input type="tel" id="phone" placeholder="请输入手机号">
+    <input type="tel" id="phone" placeholder="请输入手机号" required>
   </div>
   <button id="submitBtn">提交</button>
   <div id="tip" style="margin-top:12px"></div>
@@ -26,11 +30,32 @@
 <script>
 const btn = document.getElementById('submitBtn')
 const tip = document.getElementById('tip')
+let isLoading = false
 
 btn.onclick = async () => {
+  // 请求进行中，直接拦截
+  if (isLoading) return
+
   const name = document.getElementById('name').value.trim()
   const phone = document.getElementById('phone').value.trim()
   tip.innerText = ''
+
+  // 表单校验：未填写完整禁止提交
+  if (!name) {
+    tip.style.color = 'red'
+    tip.innerText = '请输入姓名'
+    return
+  }
+  if (!phone) {
+    tip.style.color = 'red'
+    tip.innerText = '请输入手机号'
+    return
+  }
+
+  // 校验通过，开始请求
+  isLoading = true
+  btn.disabled = true
+  btn.innerText = '提交中...'
 
   try {
     const res = await fetch('/api/submit', {
@@ -54,6 +79,11 @@ btn.onclick = async () => {
   } catch (e) {
     tip.style.color = 'red'
     tip.innerText = '网络请求失败'
+  } finally {
+    // 无论成功失败都恢复按钮
+    isLoading = false
+    btn.disabled = false
+    btn.innerText = '提交'
   }
 }
 </script>
