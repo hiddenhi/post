@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Table DAT 命令查询器</title>
+<style>
+  body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+  textarea, input, button { font-family: monospace; font-size: 14px; }
+  input { background: #252526; color: #cecece; border: 1px solid #444; padding: 6px; width: 100%; box-sizing: border-box; margin-top: 4px; }
+  button { background: #0e639c; color: white; border: none; padding: 8px 16px; cursor: pointer; margin: 4px; }
+  button:hover { background: #1177bb; }
+  .row { margin: 10px 0; }
+  .label { display: inline-block; width: 80px; }
+  #output { background: #000; padding: 10px; height: 340px; overflow-y: scroll; white-space: pre-wrap; border: 1px solid #444; margin-top: 10px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 3px; font-size: 12px; margin-left: 8px; }
+  .badge.mem { background: #b58900; color: #1e1e1e; }
+  .cmd-help { color: #888; font-size: 12px; margin-top: 6px; line-height: 1.6; }
+  .quick button { background: #333; }
+</style>
+</head>
+<body>
+
+<h2>🗄️ table.dat 命令查询器 <span id="modeBadge"></span></h2>
+
+<div class="row">
+  <button onclick="document.getElementById('fileInput').click()">📂 加载 table.dat</button>
+  <input type="file" id="fileInput" style="display:none" accept=".dat">
+    <button onclick="exportToFile()" style="background:#2e7d32">💾 导出 table.dat</button>
+  <br>
+  <span id="fileInfo"></span>
+</div>
+
+<hr style="border-color:#444">
+
+<div class="row">
+  <div class="label">命令:</div>
+  <input type="text" id="cmdInput" placeholder="type*get,table=user,key=ttmmm123,pass=a123456">
+  <div class="cmd-help">
+    命令格式（逗号分隔，顺序不限）：<br>
+    • <b>type*info</b> — 列出所有表<br>
+    • <b>type*table,table=表名</b> — 检查表是否存在<br>
+    • <b>type*new,table=表名,key=admin,pass=123456,value=容量</b> — 新建表（仅内存）<br>
+    • <b>type*set,table=表名,key=键,pass=密码,value=整数值</b> — 写入（仅内存）<br>
+    • <b>type*get,table=表名,key=键,pass=密码</b> — 查询值
+  </div>
+</div>
+
+<div class="row quick">
+
+  <button onclick="setCmd('type*info')">info</button>
+  <button onclick="setCmd('type*table,table=user')">table</button>
+  <button onclick="setCmd('type*new,table=test,key=admin,pass=123456,value=128')">new</button>
+  <button onclick="setCmd('type*set,table=test,key=mykey,pass=mypass,value=42')">set</button>
+  <button onclick="setCmd('type*get,table=test,key=mykey,pass=mypass')">get</button>
+  <button onclick="runCmd()" style="background:#0e639c">▶ 执行</button>
+  <button onclick="clearOutput()">清空</button>
+</div>
+
+<div id="output"></div>
+
+<script>
+// ==================== 全局状态 ====================
+let tables = [];          // { name, size, data: Float32Array, isMemory: bool }
+let fileLoaded = false;
+const table_YC = 1000000;
+const table_eps = 1e-7;
+const ADMIN_USER = "admin";
+const ADMIN_PASS = "123456";
+
+// ==================== 文件加载 =====================
+document.getElementById('fileInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  document.getElementById('fileInfo').textContent = '  ✅ ' + file.name + ' (' + file.size + ' bytes)';
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    if (loadFromBuffer(ev.target.result)) {
+      fileLoaded = true;
+      if (typeof updateBadge === 'function') updateBadge();
+      log('✅ 文件加载成功，共 ' + tables.length + ' 个表');
+    } else {
+      log('❌ 加载失败！');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+function loadFromBuffer(buffer) {
+  tables = [];
+  const dv = new DataView(buffer);
+  let offset = 0;
+  if (offset + 4 > dv.buffer.byteLength) return false;
+  const count = dv.getInt32(offset, true); offset += 4;
+  for (let i = 0; i < count; i++) {
+    if (offset + 64 + 4 > dv.buffer.byteLength) return false;
+    let name = '';
+    for (let j = 0; j < 64; j++) {
+      const c = dv.getUint8(offset++);
+      if (c > 0) name += String.fromCharCode(c);
+    }
+    const size = dv.getInt32(offset, true); offset += 4;
+    if (offset + size * 4 > dv.buffer.byteLength) return false;
+    const floatData = new Float32Array(size);
+    for (let j = 0; j < size; j++) {
+      floatData[j] = dv.getFloat32(offset, true); offset += 4;
+    }
+    tables.push({ name: name.trim(), size: size, data: floatData, isMemory: false });
+  }
+  return true;
+}
+
+// ==================== 算法函数 ====================
+function table_strtofloat(str) {
+  const len = str.length;
+  if (len === 0) return 0.0;
+  const pad = (len % 2 === 0) ? 0 : 1;
+  const new_len = len + pad;
+  let result = 1.0;
+  for (let i = 0; i < new_len; i += 2) {
+    let low = 0, high = 0;
+    const idx_low = i, idx_high = i + 1;
+    if (idx_low >= pad) low = str.charCodeAt(idx_low - pad) & 0xFF;
+    if (idx_high >= pad && idx_high < new_len) high = str.charCodeAt(idx_high - pad) & 0xFF;
+    const value = (high << 8) | low;
+    result *= value * 0.00001;
+  }
+  return result;
+}
+
+function table_sp(a, b, d) {
+  const delta = (a - b) * (a - b) + 4 * d;
+  if (delta < 0) return 0.0;
+  return (-(a + b) + Math.sqrt(delta)) / 2.0;
+}
+
+function table_out(a, b, c) {
+  return Math.round((a + c) * (b + c) / table_eps) * table_eps;
+}
+
+function isFloatZero(v) {
+  const buf = new ArrayBuffer(4);
+  new Float32Array(buf)[0] = v;
+  const u = new Uint8Array(buf);
+  return u[0] === 0 && u[1] === 0 && u[2] === 0 && u[3] === 0;
+}
+
+function floatEqual(a, b) {
+  const bufA = new ArrayBuffer(4), bufB = new ArrayBuffer(4);
+  new Float32Array(bufA)[0] = a;
+  new Float32Array(bufB)[0] = b;
+  const ua = new Uint8Array(bufA), ub = new Uint8Array(bufB);
+  for (let i = 0; i < 4; i++) if (ua[i] !== ub[i]) return false;
+  return true;
+}
+
+function table_yz(a, b, c) {
+  const d = table_out(a, b, c);
+  const c1 = table_sp(a, b, d);
+  return floatEqual(c, c1);
+}
+
+function table_outout(a, b, c) {
+  const d = table_out(a, b, c);
+  return Math.round(d / table_eps);
+}
+
+function table_djb2_hash(str, size) {
+  let hash = 5381;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) + hash) + (str.charCodeAt(i) & 0xFF);
+  }
+  return hash % size;
+}
+
+function table_setsou(kpv_data, kpv_data_size, a, b, hash) {
+  let nullindex = -1;
+  for (let i = 0; i < kpv_data_size; i++) {
+    const count = (i + hash) % kpv_data_size;
+    if (table_yz(a, b, kpv_data[count])) return count;
+    // 空槽判定：与原 C 版 memcmp(&c, &defau, 4) 对齐，逐字节比对 0.0f
+    if (nullindex === -1 && isFloatZero(kpv_data[count])) nullindex = count;
+  }
+  return nullindex;
+}
+
+function table_getsou(kpv_data, kpv_data_size, a, b, hash) {
+  for (let i = 0; i < kpv_data_size; i++) {
+    const count = (i + hash) % kpv_data_size;
+    if (table_yz(a, b, kpv_data[count])) return count;
+  }
+  return -1;
+}
+
+// ==================== 命令解析 ====================
+function getTable(name) {
+  for (const t of tables) if (t.name === name) return t;
+  return null;
+}
+
+function parseCmd(cmd) {
+  const params = {};
+  const parts = cmd.split(',');
+  for (const part of parts) {
+    const eq = part.indexOf('=');
+    if (eq !== -1) {
+      params[part.substring(0, eq).trim()] = part.substring(eq + 1).trim();
+    } else {
+      params['type'] = part.trim();
+    }
+  }
+  return params;
+}
+
+function checkAuth(key, pass) {
+  return key === ADMIN_USER && pass === ADMIN_PASS;
+}
+
+function runCmd() {
+  const cmd = document.getElementById('cmdInput').value.trim();
+  if (!cmd) { log('❌ 命令为空'); return; }
+  log('📤 执行: ' + cmd);
+
+  const params = parseCmd(cmd);
+  const type = params['type'];
+
+  // type*info
+  if (type === 'type*info') {
+    let out = '📋 表列表 (' + tables.length + '):\n';
+    for (const t of tables) out += '   [' + t.name + '] size=' + t.size + (t.isMemory ? ' (内存)' : '') + '\n';
+    log(out.trim());
+    return;
+  }
+
+  // type*table
+  if (type === 'type*table') {
+    const tname = params['table'];
+    if (!tname) { log('❌ 缺少 table 参数'); return; }
+    const tab = getTable(tname);
+    log('📋 table[' + tname + '] ' + (tab ? '✅ 存在' : '❌ 不存在'));
+    return;
+  }
+
+  // type*new —— 新建表（仅内存）
+  if (type === 'type*new') {
+    const tname = params['table'];
+    const key = params['key'];
+    const pass = params['pass'];
+    const value = parseInt(params['value'], 10);
+    if (!tname || !key || !pass || isNaN(value)) { log('❌ new 需要 table、key、pass、value(整数容量)'); return; }
+    if (!checkAuth(key, pass)) { log('❌ key or pass fail'); return; }
+    if (value <= 0) { log('❌ 表容量必须大于 0'); return; }
+    if (getTable(tname)) { log('❌ 表 [' + tname + '] 已存在'); return; }
+
+    tables.push({ name: tname, size: value, data: new Float32Array(value), isMemory: true });
+    log('✅ table[' + tname + '] create success, size=' + value + ' (内存)');
+    return;
+  }
+
+  // 以下命令都需要 table 参数
+  const tname = params['table'];
+  if (!tname) { log('❌ 缺少 table 参数'); return; }
+  const tab = getTable(tname);
+  if (!tab) { log('❌ 表 [' + tname + '] 不存在'); return; }
+
+  // type*set
+  if (type === 'type*set') {
+    const key = params['key'];
+    const pass = params['pass'];
+    const value = params['value'];
+    if (!key || !pass || value === undefined) { log('❌ set 需要 table、key、pass、value'); return; }
+    const ivalue = parseInt(value, 10);
+    if (isNaN(ivalue)) { log('❌ value 必须是整数'); return; }
+
+    const hash = table_djb2_hash(key, tab.size);
+    const fkey = table_strtofloat(key);
+    const fpass = table_strtofloat(pass);
+    const fvalue = (ivalue % table_YC) * table_eps;
+
+    const index = table_setsou(tab.data, tab.size, fkey, fpass, hash);
+    if (index !== -1) {
+      tab.data[index] = table_sp(fkey, fpass, fvalue);
+      tab.isMemory = true;
+      log('✅ set ok (index=' + index + ', 内存)');
+    } else {
+      log('❌ set fail: 表已满或无空槽');
+    }
+    return;
+  }
+
+  // type*get
+  if (type === 'type*get') {
+    const key = params['key'];
+    const pass = params['pass'];
+    if (!key || !pass) { log('❌ get 需要 table、key、pass'); return; }
+
+    const hash = table_djb2_hash(key, tab.size);
+    const fkey = table_strtofloat(key);
+    const fpass = table_strtofloat(pass);
+
+    const index = table_getsou(tab.data, tab.size, fkey, fpass, hash);
+    if (index !== -1) {
+      const d = table_outout(fkey, fpass, tab.data[index]);
+      log('✅ value=' + d);
+    } else {
+      log('❌ get fail: 未找到匹配记录');
+    }
+    return;
+  }
+
+  log('❌ 未知命令类型: ' + type);
+  log('   可用: type*info / type*table / type*new / type*set / type*get');
+}
+
+function setCmd(cmd) {
+  document.getElementById('cmdInput').value = cmd;
+  document.getElementById('cmdInput').focus();
+}
+
+function clearOutput() {
+  document.getElementById('output').textContent = '';
+}
+
+// ==================== 导出 table.dat ====================
+// 格式严格对齐 C 版 table_save_to_file() 的 fwrite 顺序：
+//   fwrite(&count, 4B)
+//   for each table:
+//     fwrite(name, 1B, 64)
+//     fwrite(&size, 4B)
+//     fwrite(dla, 4B, size)
+function exportToFile() {
+  if (tables.length === 0) {
+    log('❌ 当前没有可导出的表');
+    return;
+  }
+
+  // 计算总字节数
+  let totalBytes = 4; // count
+  for (const t of tables) {
+    totalBytes += 64 + 4 + t.size * 4;
+  }
+
+  const buf = new ArrayBuffer(totalBytes);
+  const dv = new DataView(buf);
+  let offset = 0;
+
+  // 写 count
+  dv.setInt32(offset, tables.length, true); offset += 4;
+
+  for (const t of tables) {
+    // 写 name（定长 64 字节，不足补 0）
+    for (let j = 0; j < 64; j++) {
+      if (j < t.name.length) {
+        dv.setUint8(offset++, t.name.charCodeAt(j) & 0xFF);
+      } else {
+        dv.setUint8(offset++, 0);
+      }
+    }
+    // 写 size
+    dv.setInt32(offset, t.size, true); offset += 4;
+    // 写 data
+    for (let j = 0; j < t.size; j++) {
+      dv.setFloat32(offset, t.data[j], true); offset += 4;
+    }
+  }
+
+  // 触发下载
+  const blob = new Blob([buf], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'table.dat';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+  log('💾 已导出 table.dat（' + totalBytes + ' bytes，' + tables.length + ' 个表）');
+  log('   说明：浏览器无法覆盖原文件，请另存为新文件后用 C 程序加载');
+
+  // 导出成功后，所有表已落地，清除内存模式标记
+  for (const t of tables) t.isMemory = false;
+  if (typeof updateBadge === 'function') updateBadge();
+}
+
+function updateBadge() {
+  const b = document.getElementById('modeBadge');
+  if (tables.some(t => t.isMemory)) {
+    b.innerHTML = '<span class="badge mem">⚠ 内存模式（set/new 改动不会写入文件）</span>';
+  } else if (fileLoaded) {
+    b.innerHTML = '<span class="badge" style="background:#2e7d32">只读（文件已加载）</span>';
+  }
+}
+
+function log(msg) {
+  const out = document.getElementById('output');
+  out.textContent += msg + '\n';
+  out.scrollTop = out.scrollHeight;
+}
+
+// 回车执行
+document.getElementById('cmdInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') runCmd();
+});
+</script>
+
+</body>
+</html>
