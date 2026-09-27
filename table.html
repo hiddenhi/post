@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Table DAT Editor</title>
+<style>
+  body { font-family: monospace; background: #111; color: #eee; }
+  textarea, input, button { font-family: monospace; }
+  textarea { width: 100%; height: 200px; }
+  button { margin: 5px; padding: 6px 12px; }
+  label { display: inline-block; width: 60px; }
+</style>
+</head>
+<body>
+
+<h2>Table DAT Editor</h2>
+<input type="file" id="fileInput" accept=".dat,.0,.1,.solt"><br><br>
+<button onclick="loadFile()">加载文件</button>
+<button onclick="saveFile()">保存文件</button>
+<button onclick="listTables()">列出表</button>
+
+<hr>
+<h3>SQL 操作</h3>
+<label>SQL:</label><input id="sql" style="width:500px" value="type*get,table=user,key=ttmmm123,pass=a123456"><br>
+<button onclick="doSql()">执行 SQL</button>
+
+<hr>
+<h3>输出</h3>
+<textarea id="out"></textarea>
+
+<script>
+/* ================== UTF-8 ================== */
+function strToUtf8Bytes(str) {
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) {
+    let c = str.codePointAt(i);
+    if (c <= 0x7F) { bytes.push(c); }
+    else if (c <= 0x7FF) { bytes.push(0xC0|(c>>6), 0x80|(c&0x3F)); }
+    else if (c <= 0xFFFF) { bytes.push(0xE0|(c>>12), 0x80|((c>>6)&0x3F), 0x80|(c&0x3F)); }
+    else { bytes.push(0xF0|(c>>18), 0x80|((c>>12)&0x3F), 0x80|((c>>6)&0x3F), 0x80|(c&0x3F)); i++; }
+  }
+  return bytes;
+}
+
+/* ================== FNV-1a ================== */
+function table_strtofloats(str) {
+  const bytes = strToUtf8Bytes(str);
+  let h = 0x811C9DC5;
+  for (let i = 0; i < bytes.length; i++) {
+    h ^= bytes[i];
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/* ================== DJB2 ================== */
+function table_djb2_hashs(str, size) {
+  const bytes = strToUtf8Bytes(str);
+  let hash = 5381;
+  for (let i = 0; i < bytes.length; i++) {
+    hash = ((hash << 5) + hash + bytes[i]) >>> 0;
+  }
+  return hash % size;
+}
+
+/* ================== atoi ================== */
+function table_atoi_ptr(str) {
+  let val = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c >= 0x30 && c <= 0x39) val = val * 10 + (c - 0x30);
+    else break;
+  }
+  return val;
+}
+
+/* ================== strip/tolower/extract ================== */
+function strip_spaces(str) {
+  let result = '';
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c !== 0x20 && c !== 0x09 && c !== 0x0A && c !== 0x0D) result += str[i];
+  }
+  return result;
+}
+function tolower_str(str) {
+  let result = '';
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    result += (c >= 0x41 && c <= 0x5A) ? String.fromCharCode(c + 0x20) : str[i];
+  }
+  return result;
+}
+function extract_field(str, key) {
+  const idx = str.indexOf(key);
+  if (idx < 0) return null;
+  let p = idx + key.length;
+  let end = str.indexOf(',', p);
+  if (end < 0) end = str.length;
+  return { val: str.substring(p, end), len: end - p };
+}
+
+/* ================== 加密/解密 (严格对齐C) ================== */
+function get_mul(K) { 
+	//return K | 1;
+	return (K | 1) >>> 0;
+}
+function get_add(K) {
+	return  ((K >>> 16) | 0x9E3779B9) >>> 0;
+}
+
+function table_sp(a, b, D) {
+  const K = (a ^ b) >>> 0;
+  const D20 = D & 0x000FFFFF;
+  const mul = get_mul(K);
+  const add = get_add(K);
+  const C_body = (Math.imul(D20, mul) + add) & 0x000FFFFF;
+  const check = K & 0xFFF;
+  return ((check << 20) | C_body) >>> 0;
+}
+
+function table_yzout(a, b, c) {
+  const K = (a ^ b) >>> 0;
+  console.log("K:"+K);
+  const check_stored = (c >> 20) & 0xFFF;
+  console.log("check_stored:"+check_stored);
+  const C_body = c & 0x000FFFFF;
+  console.log("C_body:"+C_body);
+  if (check_stored !== (K & 0xFFF)) return null;
+  
+  const mul = get_mul(K);
+  console.log("mul:"+mul);
+  const add = get_add(K);
+	console.log("add:"+add);
+  // ★ 修复：完全模拟 C uint32_t 回绕
+  let inv = mul;
+  for (let i = 0; i < 4; i++) {
+    const prod = Math.imul(mul, inv) >>> 0;
+    const diff = (2 - prod) >>> 0;
+    inv = Math.imul(inv, diff) >>> 0;
+  }
+
+  const temp = (C_body - add) >>> 0;
+  const ttmmpp=Math.imul(temp, inv);
+  console.log(ttmmpp);
+  const D20 = ttmmpp & 0x000FFFFF;
+  return D20;
+}
+
+/* ================== 表 ================== */
+class Table { constructor(name, size) { this.name = name; this.size = size; this.data = new Uint32Array(size); } }
+let tables = [];
+
+/* ================== 文件 I/O ================== */
+function loadFile() {
+  const file = document.getElementById('fileInput').files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const buf = new DataView(e.target.result);
+    let off = 0;
+    const count = buf.getInt32(off, true); off += 4;
+    tables = [];
+    for (let i = 0; i < count; i++) {
+      let name = '';
+      for (let j = 0; j < 64; j++) { const c = buf.getUint8(off++); if (c) name += String.fromCharCode(c); }
+      const size = buf.getInt32(off, true); off += 4;
+      const t = new Table(name, size);
+      for (let j = 0; j < size; j++) { t.data[j] = buf.getUint32(off, true); off += 4; }
+      tables.push(t);
+    }
+    out('加载成功: ' + count + ' 张表');
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function saveFile() {
+  if (tables.length === 0) return out('没有表');
+  let size = 4;
+  for (const t of tables) size += 64 + 4 + t.size * 4;
+  const buf = new ArrayBuffer(size);
+  const v = new DataView(buf);
+  let off = 0;
+  v.setInt32(off, tables.length, true); off += 4;
+  for (const t of tables) {
+    for (let i = 0; i < 64; i++) v.setUint8(off++, i < t.name.length ? t.name.charCodeAt(i) & 0xFF : 0);
+    v.setInt32(off, t.size, true); off += 4;
+    for (let i = 0; i < t.size; i++) { v.setUint32(off, t.data[i] >>> 0, true); off += 4; }
+  }
+  const blob = new Blob([buf], { type: 'application/octet-stream' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'table.dat.1'; a.click();
+  out('保存成功');
+}
+
+function getTable(name) { for (let i = 0; i < tables.length; i++) if (tables[i].name === name) return tables[i]; return null; }
+
+/* ================== SQL ================== */
+function doSql() {
+  let str = document.getElementById('sql').value;
+  if (!str) return out('empty');
+  str = strip_spaces(str);
+  str = tolower_str(str);
+
+  const typeField  = extract_field(str, 'type*');
+  const tableField = extract_field(str, 'table=');
+  const keyField   = extract_field(str, 'key=');
+  const passField  = extract_field(str, 'pass=');
+  const valueField = extract_field(str, 'value=');
+  if (!typeField) return out('TABLE_SQL_ERR: no type');
+  const type = typeField.val, typelen = typeField.len;
+
+  if (type.substring(0, typelen) === 'info') {
+    let result = '';
+    for (let i = 0; i < tables.length; i++) result += tables[i].name + '=' + tables[i].size + ',';
+    out(result || 'TABLE_SQL_OK');
+    return;
+  }
+  if (type.substring(0, typelen) === 'exist') {
+    if (!tableField) return out('TABLE_SQL_ERR: no table');
+    const tab = getTable(tableField.val);
+    out(tab ? 'exist=1' : 'exist=0');
+    return;
+  }
+  if (type.substring(0, typelen) === 'save') {
+    if (!keyField || !passField) return out('TABLE_SQL_FAIL');
+    if (keyField.val === 'admin' && passField.val === '123456') { out('async save'); return; }
+    else { out('auth fail'); return; }
+  }
+  if (type.substring(0, typelen) === 'new') {
+    if (!tableField || !keyField || !passField || !valueField) return out('error');
+    if (keyField.val === 'admin' && passField.val === '123456') {
+	  const tab = getTable(tableField.val);
+	  if(tab){out('exist table'); return;}
+      const size = table_atoi_ptr(valueField.val);
+      tables.push(new Table(tableField.val, size));
+      out('create success'); return;
+    } else { out('auth fail'); return; }
+  }
+  if (!tableField || !keyField || !passField) return out('error');
+  const tab = getTable(tableField.val);
+  if (!tab) return out('not table');
+
+  const hash  = table_djb2_hashs(keyField.val, tab.size);
+  const fkey  = table_strtofloats(keyField.val);
+  const fpass = table_strtofloats(passField.val);
+  console.log("fkey:"+fkey+"fpass:"+fpass);
+  if (type.substring(0, typelen) === 'get') {
+    for (let i = 0; i < tab.size; i++) {
+      const idx = (i + hash) % tab.size;
+      const d = table_yzout(fkey, fpass, tab.data[idx]);
+      if (d !== null) { out('value=' + d + '\n@ index=' + idx); return; }
+    }
+    out('get fail'); return;
+  }
+  if (type.substring(0, typelen) === 'set') {
+    if (!valueField) return out('error');
+    let nullindex = -1;
+    for (let i = 0; i < tab.size; i++) {
+      const idx = (i + hash) % tab.size;
+      if (table_yzout(fkey, fpass, tab.data[idx]) !== null) {
+        const fvalue = table_atoi_ptr(valueField.val) & 0xFFFFF;
+        tab.data[idx] = table_sp(fkey, fpass, fvalue);
+        out('set ok (overwrite @ ' + idx + ')'); return;
+      }
+      if (nullindex === -1 && tab.data[idx] === 0) nullindex = idx;
+    }
+    if (nullindex >= 0) {
+      const fvalue = table_atoi_ptr(valueField.val) & 0xFFFFF;
+      tab.data[nullindex] = table_sp(fkey, fpass, fvalue);
+      out('set ok (new @ ' + nullindex + ')'); return;
+    }
+    out('set fail'); return;
+  }
+  out('err type');
+}
+
+function listTables() {
+  let result = '';
+  for (let i = 0; i < tables.length; i++) result += tables[i].name + ' [' + tables[i].size + ']\n';
+  out(result || 'no tables');
+}
+
+function out(s) { document.getElementById('out').value = s; }
+</script>
+</body>
+</html>
