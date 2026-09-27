@@ -230,6 +230,8 @@ function doSql() {
   if (type.substring(0, typelen) === 'new') {
     if (!tableField || !keyField || !passField || !valueField) return out('error');
     if (keyField.val === 'admin' && passField.val === '123456') {
+	  const tab = getTable(tableField.val);
+	  if(tab){out('exist table'); return;}
       const size = table_atoi_ptr(valueField.val);
       tables.push(new Table(tableField.val, size));
       out('create success'); return;
