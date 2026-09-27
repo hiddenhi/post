@@ -216,6 +216,12 @@ function doSql() {
     out(result || 'TABLE_SQL_OK');
     return;
   }
+  if (type.substring(0, typelen) === 'exist') {
+    if (!tableField) return out('TABLE_SQL_ERR: no table');
+    const tab = getTable(tableField.val);
+    out(tab ? 'exist=1' : 'exist=0');
+    return;
+  }
   if (type.substring(0, typelen) === 'save') {
     if (!keyField || !passField) return out('TABLE_SQL_FAIL');
     if (keyField.val === 'admin' && passField.val === '123456') { out('async save'); return; }
