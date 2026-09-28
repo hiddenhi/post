@@ -100,52 +100,73 @@ function extract_field(str, key) {
   return { val: str.substring(p, end), len: end - p };
 }
 
-/* ================== 加密/解密 (严格对齐C) ================== */
-function get_mul(K) { 
-	//return K | 1;
-	return (K | 1) >>> 0;
-}
-function get_add(K) {
-	return  ((K >>> 16) | 0x9E3779B9) >>> 0;
+/***************计算函数*************/
+/* ================== 加密/解密 (严格对齐上面C语言，无mul/add，无固件密钥) ================== */
+
+// CRC12 单字节更新，和C完全一致
+function crc12Update(crc, data) {
+    crc ^= (data << 4);
+    for(let i=0;i<8;i++){
+        if(crc & 0x800){
+            crc = (crc << 1) ^ 0x80F;
+        }else{
+            crc = crc << 1;
+        }
+    }
+    return crc & 0xFFF;
 }
 
+// 送入一个uint32_t，4字节，和crc12_feed_u32对齐
+function crc12FeedU32(crc, val) {
+    val = val >>> 0;
+    let b0 = (val >> 0) & 0xFF;
+    let b1 = (val >> 8) & 0xFF;
+    let b2 = (val >> 16) & 0xFF;
+    let b3 = (val >> 24) & 0xFF;
+    crc = crc12Update(crc, b0);
+    crc = crc12Update(crc, b1);
+    crc = crc12Update(crc, b2);
+    crc = crc12Update(crc, b3);
+    return crc & 0xFFF;
+}
+
+// 计算CRC12(A,B,C_body,D20)
+function crc12Calc(A,B,C_body,D20) {
+    let crc = 0;
+    crc = crc12FeedU32(crc, A);
+    crc = crc12FeedU32(crc, B);
+    crc = crc12FeedU32(crc, C_body);
+    crc = crc12FeedU32(crc, D20);
+    return crc & 0xFFF;
+}
+
+// 打包函数 table_sp 【接口不变】
 function table_sp(a, b, D) {
-  const K = (a ^ b) >>> 0;
-  const D20 = D & 0x000FFFFF;
-  const mul = get_mul(K);
-  const add = get_add(K);
-  const C_body = (Math.imul(D20, mul) + add) & 0x000FFFFF;
-  const check = K & 0xFFF;
-  return ((check << 20) | C_body) >>> 0;
+    const K = (a ^ b) >>> 0;
+    const D20 = D & 0x000FFFFF;
+    const C_body = (K ^ D20) & 0x000FFFFF;
+
+    const check = crc12Calc(a, b, C_body, D20);
+    const packed = ((check << 20) | C_body) >>> 0;
+    return packed;
 }
 
+// 解包校验 table_yzout：成功返回D数值，失败返回null 【接口不变】
 function table_yzout(a, b, c) {
-  const K = (a ^ b) >>> 0;
-  console.log("K:"+K);
-  const check_stored = (c >> 20) & 0xFFF;
-  console.log("check_stored:"+check_stored);
-  const C_body = c & 0x000FFFFF;
-  console.log("C_body:"+C_body);
-  if (check_stored !== (K & 0xFFF)) return null;
-  
-  const mul = get_mul(K);
-  console.log("mul:"+mul);
-  const add = get_add(K);
-	console.log("add:"+add);
-  // ★ 修复：完全模拟 C uint32_t 回绕
-  let inv = mul;
-  for (let i = 0; i < 4; i++) {
-    const prod = Math.imul(mul, inv) >>> 0;
-    const diff = (2 - prod) >>> 0;
-    inv = Math.imul(inv, diff) >>> 0;
-  }
+    const check_stored = (c >> 20) & 0xFFF;
+    const C_body = c & 0x000FFFFF;
 
-  const temp = (C_body - add) >>> 0;
-  const ttmmpp=Math.imul(temp, inv);
-  console.log(ttmmpp);
-  const D20 = ttmmpp & 0x000FFFFF;
-  return D20;
+    const K = (a ^ b) >>> 0;
+    const D20 = (K ^ C_body) & 0x000FFFFF;
+
+    const crc_calc = crc12Calc(a, b, C_body, D20);
+    if (crc_calc !== check_stored) {
+        return null;
+    }
+    return D20;
 }
+
+
 
 /* ================== 表 ================== */
 class Table { constructor(name, size) { this.name = name; this.size = size; this.data = new Uint32Array(size); } }
